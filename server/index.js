@@ -4,119 +4,116 @@ const { textToComic } = require("./utils/Controller.js");
 const path = require("path");
 const PDFDocument = require("pdfkit");
 const fs = require("fs");
-var nodemailer = require('nodemailer');
-require('dotenv').config();
-
-
-
-var transporter = nodemailer.createTransport({
-  service: 'gmail',
-  auth: {
-    user: 'barigirish21@gmail.com',
-    pass: 'wjta teuw ljoq taxn'
-  }
-})
+const nodemailer = require("nodemailer");
+require("dotenv").config();
 
 const app = express();
-app.use(
-  cors({
-    origin: "http://localhost:3000",
-  })
-);
+const PORT = Number(process.env.PORT || 5000);
+const outputDir = path.resolve(__dirname, "./final/main");
+const pdfDir = path.resolve(__dirname, "./pdfs");
 
-const PORT = 5000;
-
+app.use(cors({
+  origin: process.env.CORS_ORIGIN || "http://localhost:3000",
+}));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-const makePdf = () => {
+function createTransporter() {
+  const { SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS } = process.env;
+  if (!SMTP_HOST || !SMTP_USER || !SMTP_PASS) return null;
+  return nodemailer.createTransport({
+    host: SMTP_HOST,
+    port: Number(SMTP_PORT || 587),
+    secure: process.env.SMTP_SECURE === "true",
+    auth: { user: SMTP_USER, pass: SMTP_PASS },
+  });
+}
+
+function makePdf() {
   return new Promise((resolve, reject) => {
     try {
-      const imageFiles = fs.readdirSync("./final/main/");
-      if (imageFiles.length === 0) {
-        console.log(imageFiles)
-        reject("no image has been generated")
+      if (!fs.existsSync(outputDir)) {
+        reject(new Error("No generated image directory exists."));
         return;
-      };
-      let randomNum = Math.floor(Math.random() * 1000);
+      }
 
+      const imageFiles = fs.readdirSync(outputDir)
+        .filter((file) => /\.(png|jpe?g|webp)$/i.test(file))
+        .sort();
+
+      if (imageFiles.length === 0) {
+        reject(new Error("No generated images were found."));
+        return;
+      }
+
+      fs.mkdirSync(pdfDir, { recursive: true });
+      const pdfPath = path.join(pdfDir, \`comic-\${Date.now()}.pdf\`);
       const doc = new PDFDocument({ size: [512, 515] });
-      const pdfPath = path.join(__dirname, '/pdfs/', `newFileName${randomNum}.pdf`);
+      const stream = fs.createWriteStream(pdfPath);
 
-      console.log("yes from makePDF");
-      if (!pdfPath) reject("no path generated");
-      doc.pipe(fs.createWriteStream(pdfPath));
-
-      imageFiles.forEach((image) => {
-        const imagePath = `./final/main/${image}`;
-        doc.image(imagePath, 1, 1, { fit: [512, 512] });
-        doc.addPage();
+      doc.pipe(stream);
+      imageFiles.forEach((imageFile, index) => {
+        doc.image(path.join(outputDir, imageFile), 1, 1, { fit: [512, 512] });
+        if (index < imageFiles.length - 1) doc.addPage();
       });
       doc.end();
-      resolve(pdfPath);
+
+      stream.on("finish", () => resolve(pdfPath));
+      stream.on("error", reject);
     } catch (error) {
       reject(error);
     }
   });
-};
+}
 
-app.get("/download", async (req, res) => {
-  const pdfPath = await makePdf();
-  var mailOptions = {
-    from: 'barigirish21@gmail.com',
-    to: 'girishbari15@gmail.com',
-    subject: 'Sending Email using Node.js',
-    text: 'That was easy!',
-    attachments: [
-      {
-        filename: 'example.pdf',
-        content: fs.createReadStream(pdfPath)
-      }
-    ]
-  };
-  transporter.sendMail(mailOptions, function (error, info) {
-    if (error) {
-      console.log(error);
-    } else {
-      console.log('Email sent: ' + info.response);
-    }
-  });
+async function deliverPdf(pdfPath, res) {
+  const recipient = process.env.COMIC_DELIVERY_TO;
+  const transporter = createTransporter();
 
+  if (!transporter || !recipient) {
+    res.download(pdfPath, "comic.pdf");
+    return;
+  }
+
+  try {
+    await transporter.sendMail({
+      from: process.env.SMTP_FROM || process.env.SMTP_USER,
+      to: recipient,
+      subject: process.env.COMIC_EMAIL_SUBJECT || "Your Comic",
+      text: "Your generated comic is attached.",
+      attachments: [{ filename: "comic.pdf", path: pdfPath }],
+    });
+    res.status(200).json({ message: "Comic delivered by email." });
+  } catch (error) {
+    console.error("Email delivery failed:", error);
+    res.status(502).json({ error: "Comic generated, but email delivery failed." });
+  }
+}
+
+app.get("/download", async (_req, res) => {
+  try {
+    const pdfPath = await makePdf();
+    await deliverPdf(pdfPath, res);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
 app.post("/", async (req, res) => {
-  const { userText, customization, diffusionKey } = req.body;
-  textToComic(userText, customization, diffusionKey)
-    .then(() => {
-      return makePdf();
-    })
-    .then((pdfPath) => {
-      console.log("PDF has been created" + pdfPath);
-      var mailOptions = {
-        from: 'barigirish21@gmail.com',
-        to: 'barigirish50@gmail.com',
-        subject: 'Your Comic',
-        text: 'That was easy!',
-        attachments: [
-          {
-            filename: 'example.pdf',
-            content: fs.createReadStream(pdfPath)
-          }
-        ]
-      };
-      transporter.sendMail(mailOptions, function (error, info) {
-        if (error) {
-          console.log(error);
-        } else {
-          console.log('Email sent: ' + info.response);
-          res.status(200).json({ message: info.response })
-        }
-      });
-    })
-    .catch((error) => {
-      console.log("error has been created", error);
-      res.status(404).json({ error: error.message });
-    });
+  try {
+    const { userText, customization } = req.body;
+    if (!userText || typeof userText !== "string") {
+      res.status(400).json({ error: "userText is required." });
+      return;
+    }
+
+    await textToComic(userText, customization);
+    const pdfPath = await makePdf();
+    await deliverPdf(pdfPath, res);
+  } catch (error) {
+    console.error("Comic generation failed:", error);
+    res.status(500).json({ error: error.message || "Comic generation failed." });
+  }
 });
 
-app.listen(PORT, () => console.log(`App listening at localhost:${PORT}`));
+app.listen(PORT, () => console.log(\`App listening at localhost:\${PORT}\`));
